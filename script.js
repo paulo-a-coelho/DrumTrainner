@@ -5,35 +5,79 @@ async function startListening() {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   const audioCtx = new AudioContext();
   const source = audioCtx.createMediaStreamSource(stream);
-  const analyser = audioCtx.createAnalyser();
 
-  analyser.fftSize = 2048;
-  source.connect(analyser);
-  const data = new Uint8Array(analyser.frequencyBinCount);
+  // Kick filter (low)
+  const kickFilter = audioCtx.createBiquadFilter();
+  kickFilter.type = "bandpass";
+  kickFilter.frequency.value = 100;
+  kickFilter.Q.value = 1;
 
-  const hits = [];
+  // Snare filter (mid)
+  const snareFilter = audioCtx.createBiquadFilter();
+  snareFilter.type = "bandpass";
+  snareFilter.frequency.value = 300;
+  snareFilter.Q.value = 1;
 
-  function detectBeats() {
-    analyser.getByteTimeDomainData(data);
-    let energy = 0;
-    for (let i = 0; i < data.length; i++) {
-      const val = (data[i] - 128) / 128;
-      energy += val * val;
-    }
-    if (energy > 0.02) {
-      const now = performance.now();
-      if (hits.length === 0 || now - hits[hits.length - 1] > 200) {
-        hits.push(now);
-        if (hits.length <= 8) drawNotation(hits.length);
+  // Hi-hat filter (high)
+  const hatFilter = audioCtx.createBiquadFilter();
+  hatFilter.type = "highpass";
+  hatFilter.frequency.value = 5000;
+
+  // Analysers
+  const analyserKick = audioCtx.createAnalyser();
+  const analyserSnare = audioCtx.createAnalyser();
+  const analyserHat = audioCtx.createAnalyser();
+  analyserKick.fftSize = analyserSnare.fftSize = analyserHat.fftSize = 1024;
+
+  // Connect graph
+  source.connect(kickFilter).connect(analyserKick);
+  source.connect(snareFilter).connect(analyserSnare);
+  source.connect(hatFilter).connect(analyserHat);
+
+  // Buffers
+  const dataKick = new Uint8Array(analyserKick.frequencyBinCount);
+  const dataSnare = new Uint8Array(analyserSnare.frequencyBinCount);
+  const dataHat = new Uint8Array(analyserHat.frequencyBinCount);
+
+  const detectedNotes = [];
+
+  function detect() {
+    analyserKick.getByteTimeDomainData(dataKick);
+    analyserSnare.getByteTimeDomainData(dataSnare);
+    analyserHat.getByteTimeDomainData(dataHat);
+
+    const energyKick = dataKick.reduce((a, b) => a + Math.abs(b - 128), 0);
+    const energySnare = dataSnare.reduce((a, b) => a + Math.abs(b - 128), 0);
+    const energyHat = dataHat.reduce((a, b) => a + Math.abs(b - 128), 0);
+
+    const now = performance.now();
+
+    if (energyKick > 5000) {
+      if (detectedNotes.length === 0 || now - detectedNotes[detectedNotes.length - 1].time > 200) {
+        detectedNotes.push({ type: "kick", time: now });
+        drawNotation(detectedNotes);
       }
     }
-    requestAnimationFrame(detectBeats);
+    if (energySnare > 5000) {
+      if (detectedNotes.length === 0 || now - detectedNotes[detectedNotes.length - 1].time > 200) {
+        detectedNotes.push({ type: "snare", time: now });
+        drawNotation(detectedNotes);
+      }
+    }
+    if (energyHat > 5000) {
+      if (detectedNotes.length === 0 || now - detectedNotes[detectedNotes.length - 1].time > 200) {
+        detectedNotes.push({ type: "hihat", time: now });
+        drawNotation(detectedNotes);
+      }
+    }
+
+    requestAnimationFrame(detect);
   }
 
-  detectBeats();
+  detect();
 }
 
-function drawNotation(count) {
+function drawNotation(notes) {
   const VF = Vex.Flow;
   const canvas = document.getElementById("notation");
   const renderer = new VF.Renderer(canvas, VF.Renderer.Backends.CANVAS);
@@ -43,16 +87,23 @@ function drawNotation(count) {
   const stave = new VF.Stave(10, 40, 700);
   stave.addClef("percussion").setContext(context).draw();
 
-  const durations = ["q", "8", "8", "q", "h", "q", "q", "q"];
-  const notes = [];
+  const vexNotes = notes.map(n => {
+    if (n.type === "kick") {
+      return new VF.StaveNote({ keys: ["f/3"], duration: "q" });
+    }
+    if (n.type === "snare") {
+      return new VF.StaveNote({ keys: ["c/4"], duration: "q" });
+    }
+    if (n.type === "hihat") {
+      return new VF.StaveNote({ keys: ["g/5"], duration: "q" })
+        .setKeyStyle(0, { fillStyle: "black", strokeStyle: "black" })
+        .addModifier(0, new VF.Articulation("a.").setPosition(3)) // optional accent
+        .setAttribute("noteHead", "x"); // make it look like hi-hat
+    }
+  });
 
-  for (let i = 0; i < count; i++) {
-    notes.push(new VF.StaveNote({ keys: ["c/5"], duration: durations[i] || "q" })
-      .addModifier(0, new VF.Articulation("a>").setPosition(3)));
-  }
-
-  const voice = new VF.Voice({ num_beats: 4, beat_value: 4 });
-  voice.addTickables(notes);
+  const voice = new VF.Voice({ num_beats: vexNotes.length, beat_value: 4 });
+  voice.addTickables(vexNotes);
 
   new VF.Formatter().joinVoices([voice]).format([voice], 600);
   voice.draw(context, stave);
